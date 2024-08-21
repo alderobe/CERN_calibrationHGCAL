@@ -9,11 +9,14 @@ from math import sqrt
 '''
 The idea of this code is the following:
 	-input = JSON file containing the data coming from a large set of silicon module (e.g. a layer of the CE-E compartment)
-	-output = 1) Set of indices of "bad" modules
+	-output = 1) Set of names of "bad" modules
 		  2) Hexplots of flag variables (Delta_Noise, Delta_ped) for "bad" modules 
+		  3) dictionary of flagged ch {Flagged_Module_name:[list of indices of ch], ... }
 	N.B. This code needs two variables to be initialized:
-								- NumModules_good in ValidationModule_ped which defines the number of "good" modules in the current validation step
-								- FlaggedModules is a list of "bad" modules coming from the previous validation step
+			- NumModules_good in ValidationModule_ped which defines the number of "good" modules in the current validation step (= NumModules - len(FlaggedModules))
+			- FlaggedModules is a list of "bad" modules (string type name) coming from the previous validation step
+			
+The script must be run in the /LocalCalibration directory
 		  
 '''
 
@@ -72,7 +75,7 @@ def fillHexPlot(ch_values,flag_name,up, low, moduletype='LD_full'):
   
 
 
-def chi2_confidence_interval_std(n, sample_std, confidence_level=0.9):
+def chi2_confidence_interval_std(n, sample_std, confidence_level=0.7):
 	''' 
 	This module returns the confidence interval for the rms 
 	n is the number of measurements
@@ -102,33 +105,30 @@ def chi2_confidence_interval_std(n, sample_std, confidence_level=0.9):
 def JSONtoPandasDataframe(JSON_fileDirectory):
 	'''
 	This module converts the JSON file  { "Module1": {"ADC_ped": [120, ...], "Noise": [...], ...}, "Module2": ...} 
-	into a list of Pandas DataFrame (the index of the list represents the number of the module)
+	into a dict key = Module (ML-FAA-BBB) item = Pandas DataFrame 
 	'''
 	# Load the JSON file
 	with open(f'{JSON_fileDirectory}') as file:
 		data = json.load(file)
-	# Initialize an empty list to store DataFrames
-	df_list = []
+	# Initialize an empty dict to store DataFrames
+	df_dict = {}
 
 	# Iterate over each module
 	for module, record in data.items():
 		# Create a DataFrame from the record
 		df = pd.DataFrame(record)
 		
-		# Add a column to identify the module
-		#df['Module'] = module    #maybe we can just consider the index of the list as our module index
-		
-		# Append the DataFrame to the list
-		df_list.append(df)
+		# Creat a dict {Module: PandasDataFrame,}
+		df_dict[module] = df
 	
 	
-	return df_list
+	return df_dict
 
-def RefMeanRMSPedNoise(df_list, FlaggedModules):
+def RefMeanRMSPedNoise(df_dict, FlaggedModules):
 	'''
 	This module returns the reference values of the Ped and the Noise  at the beginning of the validation step
 	FlaggedModules is a list of indexes related to each module flagged in the previous validation. At the beginning, 
-	should it be initialised (or it should be empty?)
+	it should be initialised.
 	'''
 	ref_mean_ped = 0
 	ref_rms_ped = 0
@@ -136,11 +136,11 @@ def RefMeanRMSPedNoise(df_list, FlaggedModules):
 	ref_rms_noise = 0
 	cont = 0
 	i = 0
-	for i, df in enumerate(df_list):
+	for module, df in df_dict.items():
 	
-	# I want to compute the reference values as the mean among "good" modules.
+	# I want to compute the reference values as the mean among "good" modules. This is true for ADC_ped and Noise, but for the two RMS values, the sample standard deviation is used ad the statistical estimator of RMS. 
 	
-		if i not in FlaggedModules: 
+		if module not in FlaggedModules: 
 			cont += 1
 			Reasonable_pedestals = []
 			for ped in df["ADC_ped"]:
@@ -154,7 +154,7 @@ def RefMeanRMSPedNoise(df_list, FlaggedModules):
 			
 		else: continue
 			
-	# Each channel has an average pedestal, I am taking the mean of all channels within the same module so that each module is characterized by a single pedestal value. Then I am taking the mean of "good" modules, which represents the reference pedestal for the entire set of modules. 
+	# Each channel has an average pedestal, I am taking the mean of all channels within the same module so that each module is characterized by a single pedestal value. Then I am taking the mean of "good" modules, which represents the reference pedestal for the entire set of modules. Same idea for the other variables with the only difference that I am taking the mean of variances for the RMS.
 	
 	ref_mean_ped = ref_mean_ped/cont 
 	ref_rms_ped = np.sqrt(ref_rms_ped/cont)
@@ -168,8 +168,8 @@ def RefMeanRMSPedNoise(df_list, FlaggedModules):
 
 def Mean_RMS_selection(mean_ped,ref_mean_ped, rms_ped, ref_rms_ped,mean_noise,ref_mean_noise, rms_noise, ref_rms_noise, lower_bound_std_ped, upper_bound_std_ped,lower_bound_std_noise, upper_bound_std_noise ,alpha = 1):
 	'''
-	This module returns cont_mean_ped,cont_mean_noise,cont_rms_ped,cont_rms_noise = False if the module is "good" cont_mean = True if it is bad. The same for cont_rms.
-	mean_ped is the mean of all channels pedestal within the same module.
+	This module returns cont_mean_ped,cont_mean_noise,cont_rms_ped,cont_rms_noise = False if the module is good, and True if it is bad.
+	mean_ped/mean_noise is the mean of all channels pedestal/noise within the same module. The same for rms.
 	lower_bound_std, upper_bound_std and alpha define the "rejection" region. These parameters should be decreased in order to have a more strict selection or should be increased when, for instance we want to reset the system. In the latter case if alpha is sufficiently high we could empty the FlaggedModules in the subsequent validation
 	
 	'''
@@ -193,9 +193,12 @@ def Mean_RMS_selection(mean_ped,ref_mean_ped, rms_ped, ref_rms_ped,mean_noise,re
 	
 
 
-def ValidationModule_ped(df_list,ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise):
+def ValidationModule_ped(df_dict,ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise):
 	'''
-	This module returns the list of indexes associated to flagged modules. There are two type of flagging. One module is flagged if it has a very different average pedestal (among the average pedestals of each channel) compared to the previous "good" one or if it has a very different RMS among avg pedestals compared to the previous "good" one.
+	This module returns the list of strings associated to flagged modules. There are four type of flagging. 
+        One module is flagged: - if it has a very different average pedestal (among the average pedestals of each channel) compared to the reference value 
+	                       - if it has a very different spread (RMS) of pedestal distribution compared to the reference value
+			       - The other two conditions are the same but regarding to the Noise distribution.
 	'''
 	NumModules_good = NumModules - len(FlaggedModules)
 	# Lists which contains the indexes of "bad" modules
@@ -206,9 +209,9 @@ def ValidationModule_ped(df_list,ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_
 	flagged_modules_rms_noise = []
 	
 	#Setting the rejection area
-	lower_bound_std_ped, upper_bound_std_ped = chi2_confidence_interval_std(NumModules_good, ref_rms_ped, confidence_level=0.9)
-	lower_bound_std_noise, upper_bound_std_noise = chi2_confidence_interval_std(NumModules_good, ref_rms_noise, confidence_level=0.9)
-	alpha = 2
+	lower_bound_std_ped, upper_bound_std_ped = chi2_confidence_interval_std(NumModules_good, ref_rms_ped, confidence_level=0.7)
+	lower_bound_std_noise, upper_bound_std_noise = chi2_confidence_interval_std(NumModules_good, ref_rms_noise, confidence_level=0.7)
+	alpha = 1
 	
 	print(20*"-"+"Acceptance regions"+20*"-")
 	print("\n")
@@ -226,7 +229,7 @@ def ValidationModule_ped(df_list,ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_
 	print(48*"-")
 	
 	# iteration over modules
-	for i,df in enumerate(df_list):
+	for module, df in df_dict.items():
 	
 		# mean ped of the module
 		mean_ped = np.mean(df["ADC_ped"])
@@ -239,18 +242,18 @@ def ValidationModule_ped(df_list,ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_
 		#Checking if the mean_ped or the rms_ped are good or not
 		test_mean_ped, test_rms_ped, test_mean_noise, test_rms_noise = Mean_RMS_selection( mean_ped,ref_mean_ped, rms_ped, ref_rms_ped, mean_noise, ref_mean_noise, rms_noise, ref_rms_noise, lower_bound_std_ped, upper_bound_std_ped,lower_bound_std_noise, upper_bound_std_noise , alpha)
 		if test_mean_ped:
-			flagged_modules_mean_ped.append(i)
+			flagged_modules_mean_ped.append(module)
 		if test_rms_ped:
-			flagged_modules_rms_ped.append(i)
+			flagged_modules_rms_ped.append(module)
 		if test_mean_noise:
-			flagged_modules_mean_noise.append(i)
+			flagged_modules_mean_noise.append(module)
 		if test_rms_noise:
-			flagged_modules_rms_noise.append(i)
+			flagged_modules_rms_noise.append(module)
 			
 	return flagged_modules_mean_ped, flagged_modules_rms_ped, flagged_modules_mean_noise, flagged_modules_rms_noise
-	#oppure si potrebbe fare un dizionario con 4 key due per i flag dei ped e due per i flag dei rms
+	#oppure si potrebbe fare un dizionario con 4 keys due per i flag dei ped e due per i flag dei rms
 	
-def ValidationChannels_ped(df_list, ref_mean_ped, ref_mean_noise, Modlist_flag):
+def ValidationChannels_ped(df_dict, ref_mean_ped, ref_mean_noise, Modlist_flag):
 	'''
 	For each flagged module we want to inspect further what has caused the issue. Channel by channel
 	'''
@@ -264,8 +267,8 @@ def ValidationChannels_ped(df_list, ref_mean_ped, ref_mean_noise, Modlist_flag):
 	#ref_rms_ped_channels = ref_rms_ped/sqrt(NumChannels) #This could be a trick to evaluate the mean of the noise per each channel
 	
 	#iteration over "bad" modules
-	for i,df in enumerate(df_list):
-		if i in Modlist_flag:
+	for module, df in df_dict.items():
+		if module in Modlist_flag:
 			
 			# definition of two new coulumns. Delta_ped represents the difference between the ref_ped and the channel ped. Delta_noise is the difference between the ref rms (channel) and the channel noise
 			df["Delta_ped"] =ref_mean_ped -  df["ADC_ped"] 
@@ -275,18 +278,18 @@ def ValidationChannels_ped(df_list, ref_mean_ped, ref_mean_noise, Modlist_flag):
 			
 			#N.B. the pull could be more intuitive as a flag variables. For instance define Pull_ped = (ref_mean_ped -  ADC_ped(ch))/ref_mean_noise
 			
-			flagged_channels_pull[i] = []
+			flagged_channels_pull[module] = []
 			for j, pull_value in enumerate(df["Pull"]):
 				if abs(pull_value) > 1:
-					 flagged_channels_pull[i].append(j)
+					 flagged_channels_pull[module].append(j)
 				
 			
 			
 			
 			
 			# plotting to visualize which are the "strange" channels
-			fillHexPlot(df["Delta_ped"].to_dict(),f"Delta_ped_MOD{i}",up = 120, low = -120)
-			fillHexPlot(df["Delta_noise"].to_dict(),f"Delta_noise_MOD{i}",up = 2, low = -2)
+			fillHexPlot(df["Delta_ped"].to_dict(),f"Delta_ped_MOD{module}",up = 120, low = -120)
+			fillHexPlot(df["Delta_noise"].to_dict(),f"Delta_noise_MOD{module}",up = 2, low = -2)
 	
 			
 	#return flagged_channels_mean, flagged_channels_rms  questo lo aggiungi poi considerando di restituire anche una lista per tutti quei canali non funzionanti. dovrei anche restituire cosa non funziona? piedistallo troppo alto troppo basso ecc?
@@ -294,20 +297,19 @@ def ValidationChannels_ped(df_list, ref_mean_ped, ref_mean_noise, Modlist_flag):
 	
 	
 
-JSON_fileDirectory = "./Pedestals/Run1722725783/pedestals_160fC.json"
+JSON_fileDirectory = "./Pedestals/Run1710429303/Pedestals_Run_1710429303_80fC_6Modules.json"
 NumModules = 6
-FlaggedModules = []  #By eye the first module has a non-working region (this comment is regarding the first set of 6 Modules)
-
-# inizializzala con argparse potresti fare un file con gli indici e poi convertirlo in una lista
-
+FlaggedModules = ['ML-F3PT-TX-0003:0']  #By eye the first module has a non-working region (this comment is regarding the first set of 6 Modules)
+# The previous list could be initialised with argparse 
 def main():
 	 
-	dfPandas_list = JSONtoPandasDataframe(JSON_fileDirectory)
-	ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise  = RefMeanRMSPedNoise(dfPandas_list,FlaggedModules)
+	dfPandas_dict = JSONtoPandasDataframe(JSON_fileDirectory)
+	
+	ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise  = RefMeanRMSPedNoise(dfPandas_dict,FlaggedModules)
 	
 	
 	#Verifico i moduli
-	flagMod_mean_ped, flagMod_rms_ped, flagMod_mean_noise, flagMod_rms_noise = ValidationModule_ped(dfPandas_list, ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise)
+	flagMod_mean_ped, flagMod_rms_ped, flagMod_mean_noise, flagMod_rms_noise = ValidationModule_ped(dfPandas_dict, ref_mean_ped, ref_rms_ped, ref_mean_noise, ref_rms_noise)
 	
 	print(40*"-")
 	print("<ADC_ped> outside the acceptance region")
@@ -324,11 +326,13 @@ def main():
 	print(40*"-")
 	
 	union_set = set(flagMod_mean_ped) | set(flagMod_rms_ped) |set(flagMod_mean_noise) | set(flagMod_rms_noise)
+	
+	#New list of flagged modules
 	Modlist_flag = list(union_set)
 	print("Complete set of flagged modules:")
 	print(Modlist_flag)
 	
-	flagged_channels_pull = ValidationChannels_ped(dfPandas_list, ref_mean_ped, ref_mean_noise,Modlist_flag)
+	flagged_channels_pull = ValidationChannels_ped(dfPandas_dict, ref_mean_ped, ref_mean_noise,Modlist_flag)
 	
 	print("Flagged Channels")
 	print(flagged_channels_pull)
